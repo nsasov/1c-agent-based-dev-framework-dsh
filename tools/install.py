@@ -28,7 +28,14 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+import dsh_presets  # noqa: E402
+import dsh_rules  # noqa: E402
 
 try:
     import tiktoken
@@ -170,6 +177,21 @@ IDE_CONFIGS = {
         # Codex-специфика (см. _codex_mode / _install_codex_component):
         #   rule/workflow → .codex/skills/<name>/ (симлинк на каталог с SKILL.md)
         #   agent → .codex/agents/<agent-name>.toml (конвертация: frontmatter name/description + тело → developer_instructions)
+    },
+    "dsh": {
+        "name": "DeepSeek Harness (DSH)",
+        "rules_dir": ".dsh/rules",
+        "rules_ext": ".md",
+        "skills_dir": ".dsh/skills",
+        "agents_dir": ".dsh/framework/subagents",
+        "workflows_dir": ".dsh/framework/workflows",
+        "reference_dir": ".dsh/framework",
+        "presets_file": ".dsh/presets.patch.yml",
+        "launcher": "dsh-1c",
+        "manifest": ".dsh/manifest.json",
+        "local_state": ".dsh/local.json",
+        "rule_mode": "rulebase",
+        "description": "DeepSeek Harness (DSH) — навыки в .dsh/skills/, always-on правила генерируются в .dsh/rules/, пресеты в .dsh/presets.patch.yml",
     },
     "antigravity": {
         "name": "Antigravity",
@@ -454,6 +476,31 @@ class FrameworkGraph:
             return type_map.get(top)
         return None
 
+    def _is_component_file(self, md_file: Path) -> bool:
+        """True только для файлов, которые реально являются компонентами.
+
+        DSH и другие харнесы видят навык как каталог с SKILL.md, а не любой
+        Markdown с frontmatter. Раньше rglob("*.md") подхватывал
+        references/fallback-standalone.md и создавал фантомные навыки.
+        """
+        try:
+            rel = md_file.relative_to(self.framework_dir)
+        except ValueError:
+            return False
+        parts = rel.parts
+        if not parts:
+            return False
+        top = parts[0]
+        if top in ("skills", "rules", "workflows"):
+            if md_file.name != "SKILL.md":
+                return False
+            if any(part in ("references", "assets", "scripts") for part in parts[:-1]):
+                return False
+            return True
+        if top in ("subagents", "agents"):
+            return len(parts) == 2 and md_file.suffix == ".md"
+        return False
+
     def _scan(self):
         """Сканирует framework/ на .md и .mdc файлы с frontmatter."""
         for md_file in sorted(self.framework_dir.rglob("*")):
@@ -461,6 +508,8 @@ class FrameworkGraph:
                 continue
             if md_file.name.startswith("_"):
                 continue  # Пропускаем шаблоны и служебные файлы
+            if not self._is_component_file(md_file):
+                continue
 
             fm = parse_frontmatter(md_file)
             if not fm:
@@ -2327,6 +2376,567 @@ def print_trigger_skill_pairs(
             paired_skills.add(skill_id)
 
 
+# ─── DeepSeek Harness (DSH) ───────────────────────────────────────────────────
+
+DSH_AGENTS_BEGIN = "<!-- BEGIN 1c-agent-framework (managed) -->"
+DSH_AGENTS_END = "<!-- END 1c-agent-framework -->"
+DSH_GITIGNORE_MARKER = "# 1c-agent-framework managed"
+
+
+def _dsh_project_root(project_dir: Path) -> Path:
+    """Ближайший предок с .git (контракт dsh-skill-filesystem)."""
+    current = project_dir.resolve()
+    for candidate in [current, *current.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return current
+
+
+def _dsh_paths(root: Path) -> Dict[str, Path]:
+    dsh = root / ".dsh"
+    return {
+        "root": root,
+        "dsh": dsh,
+        "skills": dsh / "skills",
+        "rules": dsh / "rules",
+        "framework": dsh / "framework",
+        "manifest": dsh / "manifest.json",
+        "local": dsh / "local.json",
+        "presets": dsh / "presets.patch.yml",
+        "agents": root / "AGENTS.md",
+        "gitignore": dsh / ".gitignore",
+        "launcher_sh": root / "dsh-1c.sh",
+        "launcher_ps1": root / "dsh-1c.ps1",
+    }
+
+
+def _is_link(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    if os.name == "nt":
+        try:
+            attrs = getattr(os.lstat(path), "st_file_attributes", 0)
+            return bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT (junction)
+        except OSError:
+            return False
+    return False
+
+
+def _walk_no_follow(base: Path) -> Iterable[Path]:
+    """Обход без захода в symlink/junction (важно для uninstall/doctor)."""
+    stack = [base]
+    while stack:
+        current = stack.pop()
+        if _is_link(current):
+            yield current
+            continue
+        if current.is_dir():
+            stack.extend(current.iterdir())
+        else:
+            yield current
+
+
+def _remove_dsh_path(path: Path) -> None:
+    """Удаляет ссылку/junction/каталог, не заходя по ссылке внутрь источника."""
+    if not path.exists() and not _is_link(path):
+        return
+    if _is_link(path):
+        try:
+            path.unlink()
+            return
+        except OSError:
+            if path.is_dir():
+                os.rmdir(path)
+                return
+            raise
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _copy_dir(source: Path, target: Path) -> None:
+    if target.exists() or _is_link(target):
+        _remove_dsh_path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, target, symlinks=True)
+
+
+def _create_dir_link(source: Path, target: Path, force_copy: bool = False) -> str:
+    """Каталог: symlink → junction (Windows) → copy. Возвращает режим."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() or _is_link(target):
+        _remove_dsh_path(target)
+    if not force_copy:
+        try:
+            rel = os.path.relpath(source, target.parent)
+            target.symlink_to(rel, target_is_directory=True)
+            return "symlink"
+        except (OSError, ValueError):
+            pass
+        if os.name == "nt":
+            try:
+                result = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(target), str(source)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                if result.returncode == 0 and target.exists():
+                    return "junction"
+            except (OSError, subprocess.SubprocessError):
+                pass
+    _copy_dir(source, target)
+    return "copy"
+
+
+def _create_file_link(source: Path, target: Path, force_copy: bool = False) -> str:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() or _is_link(target):
+        _remove_dsh_path(target)
+    if not force_copy:
+        try:
+            rel = os.path.relpath(source, target.parent)
+            target.symlink_to(rel)
+            return "symlink"
+        except (OSError, ValueError):
+            pass
+    shutil.copy2(source, target)
+    return "copy"
+
+
+def _dsh_target_for_component(
+    comp: "Component", graph: "FrameworkGraph", paths: Dict[str, Path]
+) -> Tuple[Path, Path, bool]:
+    """Возвращает (target, source, is_dir) для компонента DSH."""
+    source_file, source_path, short_name = _component_source_paths(
+        comp, graph.framework_dir, graph.mirror_dir
+    )
+    if comp.type == "skill":
+        return paths["skills"] / short_name, source_path, True
+    if comp.type == "rule":
+        return paths["framework"] / "rules" / short_name, source_path, True
+    if comp.type == "workflow":
+        return paths["framework"] / "workflows" / short_name, source_path, True
+    if comp.type in ("subagent", "agent"):
+        return paths["framework"] / "subagents" / f"{short_name}.md", source_file, False
+    return paths["framework"] / comp.type / short_name, source_path, source_path.is_dir()
+
+
+def _read_dsh_manifest(root: Path) -> dict:
+    path = root / ".dsh" / "manifest.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_dsh_manifest(root: Path, graph: "FrameworkGraph", data: dict) -> None:
+    path = root / ".dsh" / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    local = {
+        "project_root": str(root.resolve()),
+        "framework_root": str(graph.framework_dir.resolve()),
+        "mirror_root": str(graph.mirror_dir.resolve()) if graph.mirror_dir else None,
+        "installed_at": datetime.now().isoformat(timespec="seconds"),
+        "cli_version": CLI_VERSION,
+    }
+    (root / ".dsh" / "local.json").write_text(
+        json.dumps(local, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _dsh_agents_block() -> str:
+    return f"""{DSH_AGENTS_BEGIN}
+## 1C Agent Development Framework on DSH
+
+Always-on rules are injected by the RuleBase plugin from `.dsh/rules/`.
+Do not edit `fw-*.md`; put project rules in other `.md` files there.
+
+- Skills: `.dsh/skills/` (discovered by DSH).
+- Reference docs: `.dsh/framework/`. Where framework text says `framework/...`,
+  resolve it under `.dsh/framework/...`.
+- On-demand rules: `.dsh/framework/rules/<id>/SKILL.md`.
+- Workflows: `.dsh/framework/workflows/<id>/SKILL.md`.
+- Subagents: prefer the generated `1c-<role>` preset via `subagent(agent_preset=...)`;
+  if presets are unavailable, read `.dsh/framework/subagents/<role>.md` and pass
+  the role body as the prompt. Keep the orchestrator in the main session.
+- Presets: `.dsh/presets.patch.yml`; start DSH via `dsh-1c.ps1`/`dsh-1c.sh`
+  so the project patch is applied. The lead preset is `1c-lead`.
+- Capabilities: `capabilities/registry.yaml`.
+- If the `framework-bootstrap` rule is missing from the rule library, read
+  `.dsh/framework/rules/framework-bootstrap/SKILL.md` before acting.
+{DSH_AGENTS_END}"""
+
+
+def _write_dsh_agents(root: Path, enabled: bool = True) -> None:
+    path = root / "AGENTS.md"
+    block = _dsh_agents_block()
+    if not enabled:
+        if not path.exists():
+            return
+        text = path.read_text(encoding="utf-8")
+        text = re.sub(
+            re.escape(DSH_AGENTS_BEGIN) + r".*?" + re.escape(DSH_AGENTS_END),
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+        path.write_text(text.strip() + ("\n" if text.strip() else ""), encoding="utf-8")
+        return
+    if not path.exists():
+        path.write_text(block + "\n", encoding="utf-8")
+        return
+    text = path.read_text(encoding="utf-8")
+    if DSH_AGENTS_BEGIN in text and DSH_AGENTS_END in text:
+        text = re.sub(
+            re.escape(DSH_AGENTS_BEGIN) + r".*?" + re.escape(DSH_AGENTS_END),
+            block,
+            text,
+            flags=re.DOTALL,
+        )
+    else:
+        text = text.rstrip() + "\n\n" + block
+    path.write_text(text.rstrip() + "\n", encoding="utf-8")
+
+
+def _dsh_gitignore_block() -> str:
+    return (
+        f"{DSH_GITIGNORE_MARKER}\n"
+        "# Links and machine-local state; generated rules/manifest are committed.\n"
+        "/skills/\n/framework\n/local.json\n"
+    )
+
+
+def _write_dsh_gitignore(root: Path) -> None:
+    path = root / ".dsh" / ".gitignore"
+    block = _dsh_gitignore_block()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(block, encoding="utf-8")
+        return
+    text = path.read_text(encoding="utf-8")
+    if DSH_GITIGNORE_MARKER not in text:
+        path.write_text(text.rstrip() + "\n\n" + block, encoding="utf-8")
+
+
+def _dsh_install_component(
+    comp: "Component",
+    graph: "FrameworkGraph",
+    paths: Dict[str, Path],
+    force_copy: bool,
+) -> Tuple[str, str]:
+    target, source, is_dir = _dsh_target_for_component(comp, graph, paths)
+    if is_dir:
+        mode = _create_dir_link(source, target, force_copy)
+    else:
+        mode = _create_file_link(source, target, force_copy)
+    return str(target), mode
+
+
+def _dsh_remove_component(
+    comp: "Component", graph: "FrameworkGraph", paths: Dict[str, Path]
+) -> bool:
+    target, _, _ = _dsh_target_for_component(comp, graph, paths)
+    if target.exists() or _is_link(target):
+        _remove_dsh_path(target)
+        return True
+    return False
+
+
+def _dsh_capabilities_link(graph: "FrameworkGraph", paths: Dict[str, Path], force_copy: bool) -> None:
+    base = graph.mirror_dir if graph.mirror_dir else graph.framework_dir
+    source = base / "capabilities"
+    if not source.is_dir():
+        return
+    _create_dir_link(source, paths["framework"] / "capabilities", force_copy)
+
+
+def _remove_empty_dirs(paths: Dict[str, Path]) -> None:
+    for key in ("subagents", "workflows", "rules", "capabilities"):
+        target = paths["framework"] / key
+        if _is_link(target):
+            _remove_dsh_path(target)
+        elif target.is_dir() and not any(target.iterdir()):
+            target.rmdir()
+    for key in ("framework", "skills", "rules", "dsh"):
+        target = paths.get(key)
+        if target and _is_link(target):
+            _remove_dsh_path(target)
+        elif target and target.is_dir() and not any(target.iterdir()):
+            target.rmdir()
+
+
+def install_dsh_components(
+    graph: "FrameworkGraph",
+    selected_ids: Set[str],
+    existing_ids: Set[str],
+    project_dir: Path,
+    force_copy: bool = False,
+    options: Optional[dict] = None,
+    dry_run: bool = False,
+) -> Tuple[int, int, int]:
+    """Установка DSH: навыки/ссылки + генерация правил, пресетов, AGENTS.md."""
+    options = options or {}
+    root = _dsh_project_root(project_dir)
+    paths = _dsh_paths(root)
+    all_ids = graph.resolve_dependencies(selected_ids)
+    existing_ids = set(existing_ids)
+
+    manifest = _read_dsh_manifest(root)
+    if not existing_ids:
+        existing_ids = set((manifest.get("dsh") or {}).get("components") or [])
+    to_remove = existing_ids - all_ids
+
+    if root != project_dir.resolve():
+        print(yellow(f"  DSH project root: {root} (--project-dir: {project_dir})"))
+
+    if dry_run:
+        print(f"  [DRY RUN] DSH root: {root}")
+        for comp_id in sorted(all_ids):
+            comp = graph.components.get(comp_id)
+            if not comp or graph.is_framework_meta_skill(comp_id):
+                continue
+            target, source, is_dir = _dsh_target_for_component(comp, graph, paths)
+            print(f"    → {'dir' if is_dir else 'file'} {target}  ({comp_id})")
+        rules = dsh_rules.select_rules(
+            dsh_rules.discover_rules(graph.framework_dir, graph.mirror_dir, options.get("lang", "en")),
+            {cid for cid in all_ids if cid.startswith("rule/")},
+            options.get("profile", "parity"),
+        )
+        print(f"    + generate {len(rules)} rule(s) into {paths['rules']}")
+        if options.get("presets", True):
+            print(f"    + generate presets into {paths['presets']}")
+        print(f"    + AGENTS.md / .dsh/.gitignore / manifest.json")
+        return (len(all_ids), 0, len(to_remove))
+
+    removed = 0
+    for comp_id in sorted(to_remove):
+        comp = graph.components.get(comp_id)
+        if comp and _dsh_remove_component(comp, graph, paths):
+            removed += 1
+
+    installed = 0
+    skipped = 0
+    installed_ids: Set[str] = set()
+    for comp_id in sorted(all_ids):
+        comp = graph.components.get(comp_id)
+        if not comp:
+            skipped += 1
+            continue
+        if graph.is_framework_meta_skill(comp_id):
+            skipped += 1
+            continue
+        try:
+            _, mode = _dsh_install_component(comp, graph, paths, force_copy)
+            installed += 1
+            installed_ids.add(comp_id)
+            print(dim(f"    ✓ {comp_id} → {mode}"))
+        except OSError as exc:
+            print(red(f"    ✗ {comp_id}: {exc}"))
+            skipped += 1
+
+    _dsh_capabilities_link(graph, paths, force_copy)
+
+    rules_data = dsh_rules.render_rules(
+        root,
+        graph.framework_dir,
+        graph.mirror_dir,
+        {cid for cid in all_ids if cid.startswith("rule/")},
+        options.get("profile", "parity"),
+        options.get("lang", "en"),
+    )
+    print(green(f"  ✓ DSH rules: {len(rules_data['rules'])} file(s), {rules_data['total_bytes']} bytes"))
+
+    presets_data: dict = {}
+    if options.get("presets", True):
+        try:
+            presets_data = dsh_presets.render_presets(
+                root,
+                graph.framework_dir,
+                graph.mirror_dir,
+                options.get("lang", "en"),
+                keep_default=options.get("keep_default_preset", False),
+            )
+            print(green(f"  ✓ DSH presets: {len(presets_data.get('roles', [])) + 1} preset(s)"))
+        except (OSError, ValueError) as exc:
+            print(yellow(f"  ⚠ DSH presets не сгенерированы: {exc}"))
+    else:
+        for generated in (paths["presets"], paths["launcher_sh"], paths["launcher_ps1"]):
+            if generated.exists():
+                generated.unlink()
+
+    manifest_data = {
+        "generator": "1c-agent-framework",
+        "version": CLI_VERSION,
+        "dsh": {
+            "profile": options.get("profile", "parity"),
+            "lang": options.get("lang", "en"),
+            "components": sorted(installed_ids),
+            "rules": rules_data.get("rules", []),
+            "total_bytes": rules_data.get("total_bytes", 0),
+            "presets": presets_data,
+        },
+    }
+    _write_dsh_manifest(root, graph, manifest_data)
+    _write_dsh_agents(root, options.get("agents_md", True))
+    _write_dsh_gitignore(root)
+    print(f"  DSH root: {root}")
+    return installed, skipped, removed
+
+
+def detect_existing_dsh_components(graph: "FrameworkGraph", project_dir: Path) -> Set[str]:
+    root = _dsh_project_root(project_dir)
+    manifest = _read_dsh_manifest(root)
+    ids = set((manifest.get("dsh") or {}).get("components") or [])
+    if ids:
+        return ids
+    paths = _dsh_paths(root)
+    detected: Set[str] = set()
+    for comp in graph.get_installable_for_user():
+        try:
+            target, source, _ = _dsh_target_for_component(comp, graph, paths)
+        except (OSError, ValueError):
+            continue
+        if target.exists() or _is_link(target):
+            try:
+                raw = os.readlink(target)
+                resolved = Path(raw)
+                if not resolved.is_absolute():
+                    resolved = target.parent / resolved
+                if resolved.resolve() == source.resolve():
+                    detected.add(comp.id)
+            except (OSError, ValueError):
+                pass
+    return detected
+
+
+def check_dsh(graph: "FrameworkGraph", project_dir: Path, profile: str = "parity", lang: str = "en") -> int:
+    root = _dsh_project_root(project_dir)
+    manifest = _read_dsh_manifest(root)
+    dsh = manifest.get("dsh") or {}
+    profile = dsh.get("profile", profile)
+    lang = dsh.get("lang", lang)
+    errors: list[str] = []
+    ok, rule_errors = dsh_rules.check_rules(root, graph.framework_dir, graph.mirror_dir, profile, lang)
+    errors.extend(rule_errors)
+    if dsh.get("presets"):
+        ok_presets, preset_errors = dsh_presets.check_presets(root)
+        errors.extend(preset_errors)
+    agents = root / "AGENTS.md"
+    if not agents.exists() or DSH_AGENTS_BEGIN not in agents.read_text(encoding="utf-8"):
+        errors.append("AGENTS.md managed block is missing")
+    paths = _dsh_paths(root)
+    for comp_id in dsh.get("components") or []:
+        comp = graph.components.get(comp_id)
+        if not comp:
+            continue
+        target, _, _ = _dsh_target_for_component(comp, graph, paths)
+        if not target.exists() and not _is_link(target):
+            errors.append(f"missing installed target: {comp_id} -> {target}")
+    for err in errors:
+        print(red(f"  ✗ {err}"))
+    if not errors:
+        print(green("  ✓ DSH install is consistent"))
+        return 0
+    return 1
+
+
+def doctor_dsh(graph: "FrameworkGraph", project_dir: Path) -> int:
+    root = _dsh_project_root(project_dir)
+    paths = _dsh_paths(root)
+    print(f"  DSH root: {root}")
+    print(f"  DSH version: {dsh_presets._dsh_version()}")
+    manifest = _read_dsh_manifest(root)
+    dsh = manifest.get("dsh") or {}
+    print(f"  Manifest: {'yes' if manifest else 'no'}")
+    print(f"  Rules: {len(dsh.get('rules') or [])} file(s), {dsh.get('total_bytes', 0)} bytes")
+    presets = dsh.get("presets") or {}
+    preset_count = len(presets.get("roles") or []) + (1 if presets.get("lead") else 0)
+    print(f"  Presets: {presets.get('file', 'missing')} ({preset_count} presets)")
+    print(f"  AGENTS.md: {'yes' if paths['agents'].exists() else 'no'}")
+    broken = 0
+    for key in ("skills", "framework"):
+        base = paths[key]
+        if base.is_dir():
+            for path in _walk_no_follow(base):
+                if _is_link(path) and not path.exists():
+                    broken += 1
+                    print(yellow(f"  broken link: {path}"))
+    print(f"  Broken links: {broken}")
+    rulebase = []
+    home = Path(os.environ.get("DSH_HOME", Path.home() / ".dsh"))
+    for pkg in sorted((home / "profiles").glob("*/package.json")):
+        try:
+            data = json.loads(pkg.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if "rulebase" in (data.get("dependencies") or {}):
+            rulebase.append(str(pkg.parent.name))
+    print(f"  RuleBase profile(s): {', '.join(rulebase) if rulebase else 'not found'}")
+    return 0 if manifest and not broken else 1
+
+
+def uninstall_dsh(graph: "FrameworkGraph", project_dir: Path) -> int:
+    root = _dsh_project_root(project_dir)
+    paths = _dsh_paths(root)
+    manifest = _read_dsh_manifest(root)
+    dsh = manifest.get("dsh") or {}
+    removed = 0
+    for comp_id in dsh.get("components") or []:
+        comp = graph.components.get(comp_id)
+        if comp and _dsh_remove_component(comp, graph, paths):
+            removed += 1
+    if not dsh.get("components"):
+        # Manifest отсутствует/пуст: удаляем цели известных компонентов
+        # (включая copy-fallback) и оставшиеся ссылки внутри .dsh.
+        for comp in graph.get_installable_for_user():
+            try:
+                target, _, _ = _dsh_target_for_component(comp, graph, paths)
+            except (OSError, ValueError):
+                continue
+            if target.exists() or _is_link(target):
+                _remove_dsh_path(target)
+                removed += 1
+        for base in (paths["skills"], paths["framework"]):
+            if not base.is_dir():
+                continue
+            for path in _walk_no_follow(base):
+                if _is_link(path):
+                    _remove_dsh_path(path)
+                    removed += 1
+    for path in paths["rules"].glob("fw-*.md"):
+        path.unlink()
+        removed += 1
+    for path in (paths["manifest"], paths["local"], paths["presets"]):
+        if path.exists():
+            path.unlink()
+            removed += 1
+    for launcher in (paths["launcher_sh"], paths["launcher_ps1"]):
+        if launcher.exists() and "Generated by tools/dsh_presets.py" in launcher.read_text(encoding="utf-8", errors="ignore"):
+            launcher.unlink()
+            removed += 1
+    _write_dsh_agents(root, enabled=False)
+    gitignore = paths["gitignore"]
+    if gitignore.exists():
+        text = gitignore.read_text(encoding="utf-8", errors="ignore")
+        block = _dsh_gitignore_block()
+        if block in text:
+            text = text.replace(block, "").rstrip()
+            if text:
+                gitignore.write_text(text + "\n", encoding="utf-8")
+            else:
+                gitignore.unlink()
+    _remove_empty_dirs(paths)
+    print(green(f"  ✓ DSH uninstalled ({removed} artifact(s))"))
+    return 0
+
+
 def install_components(
     graph: FrameworkGraph,
     selected_ids: Set[str],
@@ -2335,11 +2945,24 @@ def install_components(
     project_dir: Path,
     use_symlinks: bool,
     dry_run: bool = False,
+    dsh_options: Optional[dict] = None,
+    force_copy: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Устанавливает выбранные компоненты в директорию проекта.
     Возвращает (установлено/обновлено, пропущено, удалено).
     """
+    if ide_key == "dsh":
+        return install_dsh_components(
+            graph=graph,
+            selected_ids=selected_ids,
+            existing_ids=existing_symlink_ids,
+            project_dir=project_dir,
+            force_copy=force_copy,
+            options=dsh_options,
+            dry_run=dry_run,
+        )
+
     ide_cfg = IDE_CONFIGS[ide_key]
 
     # Резолвим зависимости
@@ -2615,6 +3238,15 @@ def relink(project_dir: Path):
         if dir_link.is_symlink() and not dir_link.exists():
             broken += 1
             print(yellow(f"  Сломан: {dir_link} → {os.readlink(dir_link)}"))
+
+    # DSH: ссылки навыков и reference-документов
+    for base in (project_dir / ".dsh" / "skills", project_dir / ".dsh" / "framework"):
+        if not base.is_dir():
+            continue
+        for path in _walk_no_follow(base):
+            if _is_link(path) and not path.exists():
+                broken += 1
+                print(yellow(f"  Сломан DSH-линк: {path}"))
 
     if broken == 0:
         print(green("  Все симлинки в порядке."))
@@ -3409,6 +4041,24 @@ def main():
                         help="Показать English-only оценку контекста")
     parser.add_argument("--estimate-context-only", action="store_true",
                         help="Только показать оценку контекста и выйти")
+    parser.add_argument("--dsh-rules-profile", choices=("parity", "lite"), default="parity",
+                        help="DSH: профиль always-on правил (parity по умолчанию)")
+    parser.add_argument("--dsh-lang", choices=("en", "ru"), default="en",
+                        help="DSH: язык правил/ролей (en по умолчанию)")
+    parser.add_argument("--dsh-no-agents-md", action="store_true",
+                        help="DSH: не создавать/не обновлять AGENTS.md")
+    parser.add_argument("--no-dsh-presets", action="store_true",
+                        help="DSH: не генерировать presets.patch.yml и wrapper")
+    parser.add_argument("--dsh-install-presets-profile", action="store_true",
+                        help="DSH: дополнительно слить пресеты в профиль (opt-in)")
+    parser.add_argument("--dsh-keep-default-preset", action="store_true",
+                        help="DSH: не ставить 1c-lead пресетом по умолчанию")
+    parser.add_argument("--check", action="store_true",
+                        help="DSH: проверить актуальность сгенерированных артефактов")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="DSH: удалить установленные артефакты, сохранив пользовательские файлы")
+    parser.add_argument("--doctor", action="store_true",
+                        help="DSH: диагностика установки")
 
     args = parser.parse_args()
 
@@ -3458,6 +4108,14 @@ def main():
     graph = FrameworkGraph(framework_dir, mirror_dir)
     print(f"  Найдено компонентов: {len(graph.components)}")
 
+    project_dir = args.project_dir.resolve()
+    if args.check:
+        sys.exit(check_dsh(graph, project_dir, args.dsh_rules_profile, args.dsh_lang))
+    if args.doctor:
+        sys.exit(doctor_dsh(graph, project_dir))
+    if args.uninstall:
+        sys.exit(uninstall_dsh(graph, project_dir))
+
     # List mode
     if args.list:
         ide_keys = args.ide
@@ -3499,9 +4157,13 @@ def main():
             else:
                 project_dir = args.project_dir.resolve()
 
-            preselected = detect_existing_component_symlinks(graph, ide_key, project_dir)
+            preselected = (
+                detect_existing_dsh_components(graph, project_dir)
+                if ide_key == "dsh"
+                else detect_existing_component_symlinks(graph, ide_key, project_dir)
+            )
             if preselected:
-                print(f"\n  Найдено существующих симлинков компонентов: {bold(str(len(preselected)))}")
+                print(f"\n  Найдено существующих компонентов: {bold(str(len(preselected)))}")
                 print(f"  {dim('Флаги в списке предварительно расставлены по текущей установке.')}")
             selected = interactive_select(
                 graph,
@@ -3570,8 +4232,12 @@ def main():
     if is_interactive and not (args.all or args.include):
         _default_sync_source = preselected
     elif args.sync:
-        _default_sync_source = detect_existing_component_symlinks(graph, ide_key, project_dir)
-        print(f"\n  Режим синхронизации (--sync): найдено текущих симлинков {bold(str(len(_default_sync_source)))}")
+        _default_sync_source = (
+            detect_existing_dsh_components(graph, project_dir)
+            if ide_key == "dsh"
+            else detect_existing_component_symlinks(graph, ide_key, project_dir)
+        )
+        print(f"\n  Режим синхронизации (--sync): найдено текущих компонентов {bold(str(len(_default_sync_source)))}")
     else:
         _default_sync_source = set()
 
@@ -3600,6 +4266,22 @@ def main():
             show_english=args.estimate_english_only,
         ):
             print(line)
+
+        if "dsh" in ide_keys:
+            dsh_selected = {
+                cid for cid in graph.resolve_dependencies(selected) if cid.startswith("rule/")
+            }
+            dsh_selected_rules = dsh_rules.select_rules(
+                dsh_rules.discover_rules(framework_dir, mirror_dir, args.dsh_lang),
+                dsh_selected,
+                args.dsh_rules_profile,
+            )
+            dsh_bytes = sum(len(rule.body.encode("utf-8")) for rule in dsh_selected_rules)
+            print(
+                f"  DSH RuleBase: {len(dsh_selected_rules)} rule(s), "
+                f"{dsh_bytes} bytes ({dsh_bytes / 1024:.1f} KiB), "
+                f"profile={args.dsh_rules_profile}"
+            )
 
         if graph.mirror_dir and not en_complete:
             print(yellow("  ⚠ Для части компонентов EN-зеркало отсутствует — они учтены как 0 токенов."))
@@ -3634,7 +4316,11 @@ def main():
         if is_interactive and not (args.all or args.include):
             cur_sync_source = preselected if current_ide_key == ide_key else set()
         elif args.sync:
-            cur_sync_source = detect_existing_component_symlinks(graph, current_ide_key, project_dir)
+            cur_sync_source = (
+                detect_existing_dsh_components(graph, project_dir)
+                if current_ide_key == "dsh"
+                else detect_existing_component_symlinks(graph, current_ide_key, project_dir)
+            )
         else:
             cur_sync_source = set()
 
@@ -3647,6 +4333,14 @@ def main():
                 project_dir=project_dir,
                 use_symlinks=use_symlinks,
                 dry_run=args.dry_run,
+                dsh_options={
+                    "profile": args.dsh_rules_profile,
+                    "lang": args.dsh_lang,
+                    "agents_md": not args.dsh_no_agents_md,
+                    "presets": not args.no_dsh_presets,
+                    "keep_default_preset": args.dsh_keep_default_preset,
+                },
+                force_copy=args.copy,
             )
         except InstallValidationError as exc:
             print(red(f"  ✗ {exc}"), file=sys.stderr)
@@ -3684,6 +4378,12 @@ def main():
         install_xml_gen(script_dir=Path(__file__).resolve().parent, dry_run=False)
     elif xml_gen_needed and args.dry_run:
         install_xml_gen(script_dir=Path(__file__).resolve().parent, dry_run=True)
+
+    if args.dsh_install_presets_profile and "dsh" in ide_keys:
+        print(yellow(
+            "  ⚠ --dsh-install-presets-profile: слияние в глобальный профиль пока не реализовано; "
+            "используйте wrapper dsh-1c.ps1/dsh-1c.sh."
+        ))
 
     # Post-install: внешние инструменты (всегда, если не указан --skip-external-tools)
     if not args.skip_external_tools:

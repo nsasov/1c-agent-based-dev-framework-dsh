@@ -42,6 +42,10 @@ Harness-specifics (branch behavior is in the stab block above):
 - **With profile** — Claude CLI under `--append-system-prompt` / `--agent orchestrator` (see
   `framework/subagents/orchestrator.md` § "Launch method" and manifest §6.1): maining is preloaded, stab — **no-op**.
 - **Without profile** — Codex / Cursor, etc.: the main flow reads the profile itself; durability — always-on stab re-trigger.
+- **DSH** — always-on rules are injected by RuleBase from `.dsh/rules/`; the path
+  map is in `AGENTS.md`; role presets (`1c-lead`, `1c-<role>`) are loaded by the
+  `dsh-1c.ps1`/`dsh-1c.sh` wrapper via `--patch .dsh/presets.patch.yml`. If a
+  preset is not loaded, read `.dsh/framework/subagents/orchestrator.md`.
 
 ## Where to go (quick map)
 

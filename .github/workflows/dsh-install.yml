@@ -1,0 +1,47 @@
+name: dsh-install
+
+on:
+  push:
+    paths:
+      - "tools/install.py"
+      - "tools/dsh_rules.py"
+      - "tools/dsh_presets.py"
+      - "tools/dsh-presets-*.yml.tmpl"
+      - "tools/dsh-rules.json"
+      - "tools/test_install_dsh.py"
+      - "tools/test_install_always_apply.py"
+      - "framework/rules/**"
+      - "framework_eng/rules/**"
+      - ".github/workflows/dsh-install.yml"
+  pull_request:
+    paths:
+      - "tools/**"
+      - "framework/rules/**"
+      - "framework_eng/rules/**"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile
+        run: python -m py_compile tools/install.py tools/dsh_rules.py tools/dsh_presets.py tools/test_install_dsh.py
+
+      - name: DSH integration tests
+        run: python tools/test_install_dsh.py
+
+      - name: Existing installer tests
+        run: python tools/test_install_always_apply.py
+
+      - name: Check DSH rules render (parity)
+        run: |
+          python tools/dsh_rules.py render --project-dir .tmp-rules-check
+          python tools/dsh_rules.py check --project-dir .tmp-rules-check

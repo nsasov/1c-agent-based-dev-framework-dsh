@@ -93,10 +93,42 @@ nohup python3 tools/resource-spike-watch/resource-spike-watch.py \
 Результаты по умолчанию: `/tmp/resource-spike-captures/`.
 Подробности: `framework_eng/skills/tool-usage/diagnostics/resource-spike-watch/SKILL.md`.
 
+## DSH (DeepSeek Harness)
+
+Установка target `dsh`:
+
+```bash
+python tools/install.py --ide dsh --all
+python tools/install.py --ide dsh --check
+python tools/install.py --ide dsh --doctor
+python tools/install.py --ide dsh --uninstall
+```
+
+Генератор правил можно запускать отдельно:
+
+```bash
+python tools/dsh_rules.py render --project-dir .
+python tools/dsh_rules.py check  --project-dir .
+```
+
+Пресеты ролей и wrapper:
+
+```bash
+python tools/dsh_presets.py render --project-dir .
+python tools/dsh_presets.py check  --project-dir .
+```
+
+Подробности: `docs/info/dsh.md`.
+
 ## Файлы
 
 - `validate-framework-deps.py` — валидатор зависимостей
 - `framework-cycles.json` — сгенерированные данные о взаимозависимостях
 - `install.py` — CLI (clone, install)
+- `dsh_rules.py` — генератор always-on правил DSH/RuleBase
+- `dsh_presets.py` — генератор DSH-пресетов и wrapper
+- `dsh-presets-lead.yml.tmpl`, `dsh-presets-role.yml.tmpl` — шаблоны пресетов
+- `dsh-rules.json` — конфигурация экспериментального профиля `lite`
+- `test_install_dsh.py` — тесты DSH-интеграции
 - `README-validate-deps.md` — подробная документация валидатора
 - `INSTALL-PY-INTEGRATION.md` — интеграция взаимозависимостей в install.py

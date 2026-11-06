@@ -579,9 +579,9 @@
       "status": "synced"
     },
     "framework/rules/framework-bootstrap/SKILL.md": {
-      "ru_hash": "sha256:07cad2724797f0eb3c41c5f1b4ea451712b8cf4da1b11ebc8f69446aaa373103",
-      "en_hash": "sha256:bbb9c3f0daaacd13eadbdc1687a8776b7ab926e3fbfedbccaa808de22f332260",
-      "synced_at": "2026-07-02T16:42:54Z",
+      "ru_hash": "sha256:0cb52acf38fd2ecfdaa7ace43ec305e01199df05a77bcffb28f8e4085e4d453e",
+      "en_hash": "sha256:b83e277b36bc3a9da6d3283ad0d9a26fd3a415c5e538b220a91d3dcee4d0b0ad",
+      "synced_at": "2026-11-06T03:36:28Z",
       "status": "synced"
     },
     "framework/rules/protected-paths/SKILL.md": {

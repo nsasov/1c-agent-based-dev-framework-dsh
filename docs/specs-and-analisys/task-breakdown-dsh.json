@@ -1,0 +1,290 @@
+{
+  "spec": "SPEC-003",
+  "title": "Интеграция 1C BSL Agent Framework с DeepSeek Harness (DSH) и RuleBase",
+  "version": 1,
+  "date": "2026-11-06",
+  "implementation_status": {
+    "done": ["DSH-001", "DSH-002", "DSH-003", "DSH-004", "DSH-005", "DSH-006", "DSH-007", "DSH-008", "DSH-009", "DSH-010", "DSH-011", "DSH-012", "DSH-013", "DSH-014", "DSH-017"],
+    "partial": ["DSH-015"],
+    "pending_optional": ["DSH-016", "DSH-018"]
+  },
+  "phases": [
+    {"id": 0, "name": "Фундамент", "estimate_days": "0.5-1"},
+    {"id": 1, "name": "Установщик DSH", "estimate_days": "2-3"},
+    {"id": 2, "name": "Правила и AGENTS.md", "estimate_days": "2-3"},
+    {"id": 3, "name": "Сабагенты и DSH-пресеты", "estimate_days": "3-5"},
+    {"id": 4, "name": "Документация, миграция, CI", "estimate_days": "1-2"}
+  ],
+  "tasks": [
+    {
+      "id": "DSH-001",
+      "phase": 0,
+      "title": "Исправить сканирование компонентов: не принимать references/assets/scripts за навыки",
+      "depends_on": [],
+      "files": ["tools/install.py", "tools/test_install_dsh.py"],
+      "acceptance": [
+        "skill/analyst, skill/architect, skill/reviewer отсутствуют в FrameworkGraph",
+        "все 149 реальных SKILL.md-компонентов остаются в графе",
+        "тест на fallback-standalone.md зелёный"
+      ]
+    },
+    {
+      "id": "DSH-002",
+      "phase": 0,
+      "title": "Аудит имён и frontmatter под контракт DSH",
+      "depends_on": [],
+      "files": ["tools/test_install_dsh.py"],
+      "acceptance": [
+        "все имена навыков соответствуют ^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        "у всех навыков есть name и description",
+        "тест падает при добавлении невалидного имени"
+      ]
+    },
+    {
+      "id": "DSH-003",
+      "phase": 0,
+      "title": "Добавить скелет target dsh в IDE_CONFIGS и --list",
+      "depends_on": ["DSH-001"],
+      "files": ["tools/install.py"],
+      "acceptance": [
+        "python tools/install.py --ide dsh --list показывает DSH и корректные пути",
+        "интерактивный выбор IDE содержит DSH",
+        "описание target отражает роль RuleBase"
+      ]
+    },
+    {
+      "id": "DSH-004",
+      "phase": 1,
+      "title": "Реализовать DSH-раскладку навыков и справочных документов",
+      "depends_on": ["DSH-003"],
+      "files": ["tools/install.py"],
+      "acceptance": [
+        "навык ставится в .dsh/skills/<short_name> и DSH видит SKILL.md",
+        "on-demand правило доступно в .dsh/framework/rules/<name>/SKILL.md",
+        "воркфлоу и субагенты доступны в .dsh/framework/...",
+        "capabilities доступны в .dsh/framework/capabilities"
+      ]
+    },
+    {
+      "id": "DSH-005",
+      "phase": 1,
+      "title": "Добавить helper создания ссылок: symlink → junction (Windows) → copy",
+      "depends_on": ["DSH-003"],
+      "files": ["tools/install.py", "tools/test_install_dsh.py"],
+      "acceptance": [
+        "на POSIX создаётся symlink",
+        "на Windows при недоступном symlink создаётся junction (независимо от detect_symlink_support)",
+        "при ошибке junction выполняется copy с предупреждением",
+        "--copy принудительно запрещает ссылки",
+        "тест Windows-only не падает на Linux (skip)"
+      ]
+    },
+    {
+      "id": "DSH-006",
+      "phase": 1,
+      "title": "Реализовать install/uninstall/dry-run/sync для DSH",
+      "depends_on": ["DSH-004", "DSH-005"],
+      "files": ["tools/install.py", "tools/test_install_dsh.py"],
+      "acceptance": [
+        "повторная установка идемпотентна",
+        "--dry-run не создаёт .dsh",
+        "--uninstall удаляет только артефакты фреймворка",
+        "пользовательский .dsh/rules/team-rules.md сохраняется",
+        "--sync находит установленные компоненты по манифесту"
+      ]
+    },
+    {
+      "id": "DSH-007",
+      "phase": 2,
+      "title": "Создать tools/dsh_rules.py: render/check/clean",
+      "depends_on": ["DSH-001"],
+      "files": ["tools/dsh_rules.py", "tools/test_install_dsh.py", "tools/dsh-rules.yaml"],
+      "acceptance": [
+        "render создаёт fw-*.md без frontmatter/backmatter",
+        "каждый файл начинается с H1",
+        "check возвращает 1 при расхождении источника и цели",
+        "clean удаляет только fw-*.md и манифест"
+      ]
+    },
+    {
+      "id": "DSH-008",
+      "phase": 2,
+      "title": "Реализовать профили parity/lite и бюджет 200/240 КиБ; parity — дефолт",
+      "depends_on": ["DSH-007"],
+      "files": ["tools/dsh_rules.py", "tools/dsh-rules.yaml", "tools/test_install_dsh.py"],
+      "acceptance": [
+        "parity — профиль по умолчанию и включает все alwaysApply:true (кроме явных исключений)",
+        "lite включает только ID из конфигурации, документирован как НЕ behaviour-preserving и не является дефолтом",
+        "для каждого исключённого правила есть решение keep/split",
+        "при >200 КиБ выводится предупреждение, при >240 КиБ — отказ",
+        "отчёт показывает суммарный объём и число правил"
+      ]
+    },
+    {
+      "id": "DSH-009",
+      "phase": 2,
+      "title": "Реализовать управляемый блок AGENTS.md и .dsh/.gitignore",
+      "depends_on": ["DSH-006"],
+      "files": ["tools/install.py", "tools/test_install_dsh.py"],
+      "acceptance": [
+        "AGENTS.md создаётся при отсутствии",
+        "существующий пользовательский текст сохраняется",
+        "повторный запуск не дублирует блок",
+        "удаление убирает только блок",
+        ".dsh/.gitignore содержит /skills/, /framework, /local.json",
+        "fw-*.md, manifest.json, presets.patch.yml и AGENTS.md не игнорируются",
+        "git status показывает коммитируемые артефакты и не показывает ссылки/local.json"
+      ]
+    },
+    {
+      "id": "DSH-010",
+      "phase": 2,
+      "title": "Добавить портируемый манифест, local.json, --check и --doctor",
+      "depends_on": ["DSH-006", "DSH-007", "DSH-009"],
+      "files": ["tools/install.py", "tools/dsh_rules.py", "tools/test_install_dsh.py"],
+      "acceptance": [
+        "manifest.json не содержит абсолютных путей и коммитится",
+        "manifest.json содержит версию DSH и хеш шаблонов пресетов",
+        "local.json содержит framework_root и не коммитится",
+        "--check не пишет, сообщает о дрейфе и работает в CI с --framework-dir",
+        "--doctor проверяет DSH, RuleBase, корень, ссылки, объём, AGENTS.md, пресеты",
+        "опциональный --install-rulebase требует явного флага и печатает предупреждение о перезапуске",
+        "коды возврата документированы"
+      ]
+    },
+    {
+      "id": "DSH-011",
+      "phase": 2,
+      "title": "Обновить отчёт контекста и вывод установки для DSH",
+      "depends_on": ["DSH-007"],
+      "files": ["tools/install.py"],
+      "acceptance": [
+        "--estimate-context показывает объём always-on правил и каталога навыков",
+        "итоговый вывод установки показывает пути .dsh и профиль",
+        "предупреждение о RuleBase, если плагин не найден"
+      ]
+    },
+    {
+      "id": "DSH-012",
+      "phase": 3,
+      "title": "Spike: проверить композицию DSH-пресетов и allowedAgentPresets",
+      "depends_on": ["DSH-006"],
+      "files": ["docs/specs-and-analisys/dsh-presets-spike.md"],
+      "acceptance": [
+        "подтверждено, что шаблонная lead/role-композиция даёт роли инструменты и skill-filesystem",
+        "подтверждено, что allowedAgentPresets на tool-subagent виден модели и выбор работает",
+        "подтверждено, что дочерний пресет без delegation не спавнит детей",
+        "подтверждено, что --patch .dsh/presets.patch.yml не конфликтует с профилем",
+        "зафиксирован fallback, если шаблоны расходятся с standard.patch.yml"
+      ]
+    },
+    {
+      "id": "DSH-013",
+      "phase": 3,
+      "title": "Реализовать генератор DSH-пресетов, patch-файл и wrapper запуска",
+      "depends_on": ["DSH-010", "DSH-012"],
+      "files": [
+        "tools/dsh-presets.py",
+        "tools/dsh-presets-lead.yml.tmpl",
+        "tools/dsh-presets-role.yml.tmpl",
+        "tools/test_install_dsh.py",
+        "dsh-1c.ps1",
+        "dsh-1c.sh"
+      ],
+      "acceptance": [
+        "генерируется .dsh/presets.patch.yml с preset-1c-lead и ролями 1c-<role>",
+        "патч ставит agent-preset-registry.default = 1c-lead (отключается --dsh-keep-default-preset)",
+        "persona каждой роли берётся из framework_eng/subagents/<role>.md без frontmatter/backmatter",
+        "в preset-1c-lead tool-subagent содержит allowedAgentPresets со всеми ролями",
+        "wrapper запускает dsh web --patch .dsh/presets.patch.yml",
+        "опциональный --dsh-install-presets-profile делает backup и управляемый блок",
+        "--check обнаруживает расхождение версии DSH/standard.patch.yml",
+        "тесты структуры патча (tolerant к !!js), уникальности id и наличия persona зелёные"
+      ]
+    },
+    {
+      "id": "DSH-018",
+      "phase": 3,
+      "title": "Опционально: JS-шаблоны workflow для full-cycle/quick-fix",
+      "depends_on": ["DSH-007"],
+      "files": ["tools/dsh-workflows/", "docs/info/dsh.md"],
+      "acceptance": [
+        "шаблон использует только хуки agent/phase/log",
+        "не дублирует Markdown-процедуры",
+        "документированы ограничения DSH workflow"
+      ]
+    },
+    {
+      "id": "DSH-014",
+      "phase": 4,
+      "title": "Документация: docs/info/dsh.md, README, rules-skills, migration",
+      "depends_on": ["DSH-010"],
+      "files": ["docs/info/dsh.md", "README.md", "docs/info/rules-skills.md", "docs/info/mcp.md", ".gitignore"],
+      "acceptance": [
+        "описаны установка, пути, ограничения RuleBase, parity/lite и пресеты",
+        "описана миграция с ~/.dsh/skills-1c и customSkillDirs",
+        "описана политика коммита: правила/AGENTS.md/manifest/пресеты — в git, ссылки/local.json — нет",
+        "есть troubleshooting и команды --doctor/--check",
+        "README содержит DSH в списке поддерживаемых IDE",
+        "описан запуск через dsh-1c.ps1/dsh-1c.sh"
+      ]
+    },
+    {
+      "id": "DSH-015",
+      "phase": 4,
+      "title": "CI: Windows + Linux smoke установки и генерации",
+      "depends_on": ["DSH-006", "DSH-007", "DSH-009"],
+      "files": [".github/workflows/dsh-install.yml", "tools/test_install_dsh.py"],
+      "acceptance": [
+        "matrix windows-latest/ubuntu-latest",
+        "запускаются unit + integration тесты",
+        "проверяется отсутствие фантомных компонентов",
+        "проверяется размер сгенерированных правил",
+        "проверяется git check-ignore для ссылок и local.json",
+        "проверяется парсинг presets.patch.yml"
+      ]
+    },
+    {
+      "id": "DSH-016",
+      "phase": 3,
+      "title": "Опционально: ретиринг тяжёлых правил для безопасного lite: компактный триггер + on-demand тело",
+      "depends_on": ["DSH-008"],
+      "files": [
+        "framework/rules/test-zero-residue/SKILL.md",
+        "framework/rules/vanessa-scenario-policy/SKILL.md",
+        "framework/rules/skill-learning-policy/SKILL.md",
+        "framework/rules/semantic-code-comments/SKILL.md",
+        "framework/rules/report-discovered-issues/SKILL.md",
+        "framework/rules/predefined-elements/SKILL.md",
+        "framework/rules/tdd-policy/SKILL.md",
+        "framework_eng/rules/",
+        "tools/dsh-rules.yaml"
+      ],
+      "acceptance": [
+        "для каждого из 7 правил есть компактный always-on триггер или решение оставить его в parity",
+        "детальные тела доступны в .dsh/framework и читаются по требованию",
+        "lite v1 сохраняет MUST/TRIGGER-семантику исключённых правил",
+        "EN-зеркало синхронизировано",
+        "поведение проверено на реальной сессии"
+      ]
+    },
+    {
+      "id": "DSH-017",
+      "phase": 4,
+      "title": "Обновить framework-bootstrap и skill-reading-protocol под DSH",
+      "depends_on": ["DSH-014"],
+      "files": [
+        "framework/rules/framework-bootstrap/SKILL.md",
+        "framework/rules/skill-reading-protocol/SKILL.md",
+        "framework_eng/rules/framework-bootstrap/SKILL.md",
+        "framework_eng/rules/skill-reading-protocol/SKILL.md"
+      ],
+      "acceptance": [
+        "в bootstrap добавлен DSH как носитель (RuleBase + AGENTS.md)",
+        "описаны пути .dsh/skills и .dsh/framework",
+        "EN-зеркало синхронизировано",
+        "depends_on не сломан"
+      ]
+    }
+  ]
+}

@@ -27,6 +27,14 @@
 Полный текст Apache License 2.0 — в `LICENSE.txt` соответствующих каталогов;
 уведомления — в их `NOTICE.txt`.
 
+## DeepSeek Harness (DSH) — MIT
+
+- [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) —
+  `tools/dsh-presets-lead.yml.tmpl` и `tools/dsh-presets-role.yml.tmpl` являются
+  производными от `@deepseek-ai/dsh-web-app/presets/standard.patch.yml`
+  (MIT, Copyright (c) DeepSeek). Шаблоны изменены: добавлены плейсхолдеры
+  персонализации и удалена delegation-группа у ролевых пресетов.
+
 ## Nikolay-Shirokov/cc-1c-skills — MIT
 
 Источник: <https://github.com/Nikolay-Shirokov/cc-1c-skills>. Код и текст, скопированные или портированные (в т.ч. «1:1»):

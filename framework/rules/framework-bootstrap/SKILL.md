@@ -42,6 +42,10 @@ alwaysApply: true
 - **С профилем** — Claude CLI под `--append-system-prompt` / `--agent orchestrator` (см.
   `framework/subagents/orchestrator.md` § «Способ запуска» и манифест §6.1): манинг пред-загружен, стаб — **no-op**.
 - **Без профиля** — Codex / Cursor и т.п.: главный поток сам читает профиль; durability — always-on ре-триггер стаба.
+- **DSH** — always-on правила инжектит RuleBase из `.dsh/rules/`; карта путей —
+  в `AGENTS.md`; пресеты ролей (`1c-lead`, `1c-<role>`) подключаются wrapper-ом
+  `dsh-1c.ps1`/`dsh-1c.sh` через `--patch .dsh/presets.patch.yml`. Если пресет
+  не загружен, читай `.dsh/framework/subagents/orchestrator.md`.
 
 ## Куда идти (короткая карта)
 

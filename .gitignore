@@ -31,6 +31,12 @@ __pycache__/
 build/
 test-output/
 
+# Local DSH install artifacts (rules/manifest/AGENTS are committed in user projects;
+# these entries protect the framework checkout from local test installs)
+.dsh/skills/
+.dsh/framework
+.dsh/local.json
+
 # Local install shortcuts
 tools/fast-install/
 .claude/fast-install.mdc

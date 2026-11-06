@@ -111,6 +111,16 @@
 
 ---
 
+## 8) DSH: правила через RuleBase
+
+В DeepSeek Harness always-on правила инжектит плагин
+[`github:mycodesite/dsh-rules`](https://github.com/mycodesite/dsh-rules) из
+`.dsh/rules/`. Поэтому правила для DSH генерируются установщиком как реальные
+`.md`-файлы (RuleBase не читает симлинки), а on-demand правила лежат в
+`.dsh/framework/`. Установка и ограничения: [dsh.md](./dsh.md).
+
+---
+
 ## 9) Связанные материалы
 
 - Навыки фреймворка: [docs/info/skills.md](./skills.md)
